@@ -36,8 +36,11 @@ package util
 
 import (
 	"errors"
+	"runtime/debug"
 
 	"github.com/pingcap/failpoint"
+	"github.com/tikv/client-go/v2/internal/logutil"
+	"go.uber.org/zap"
 )
 
 const failpointPrefix = "tikvclient/"
@@ -50,6 +53,8 @@ var (
 // EnableFailpoints enables use of failpoints.
 // It should be called before using client to avoid data race.
 func EnableFailpoints() {
+	logutil.BgLogger().Warn("failpointsEnabled = true",
+		zap.String("stack", string(debug.Stack())))
 	failpointsEnabled = true
 }
 
