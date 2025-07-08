@@ -1188,6 +1188,11 @@ func (m *minCommitTsManager) tryUpdate(newValue uint64, writeAccess WriteAccessL
 	}
 
 	if newValue > m.value {
+		logutil.BgLogger().Info("minCommitTsManager updated",
+			zap.Uint64("currentValue", m.value),
+			zap.Uint64("newValue", newValue),
+			zap.Stack("stack"),
+		)
 		m.value = newValue
 	}
 }
@@ -1665,6 +1670,13 @@ func (c *twoPhaseCommitter) cleanup(ctx context.Context) {
 	})
 }
 
+var BeforePrewrite func()
+var BeforeDDLGetCommitTS func()
+var AfterDDLGetCommitTS func(uint64)
+var AfterDMLGetCommitTS func(uint64)
+var AfterDMLUpdateLatestTS func(uint64)
+var AfterDDLCommit func(uint64)
+
 // execute executes the two-phase commit protocol.
 func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 	c.minCommitTSMgr.elevateWriteAccess(twoPCAccess)
@@ -1772,6 +1784,9 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 		commitDetail.GetLatestTsTime = time.Since(start)
 		// Plus 1 to avoid producing the same commit TS with previously committed transactions
 		c.minCommitTSMgr.tryUpdate(latestTS+1, twoPCAccess)
+		if ctx.Value("tangenta-ddl") != nil {
+			logutil.BgLogger().Info("tangenta-ddl: after update latest ts", zap.Int64("ts", int64(latestTS+1)))
+		}
 	}
 	// Calculate maxCommitTS if necessary
 	if commitTSMayBeCalculated {
@@ -1888,6 +1903,9 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 		logutil.Logger(ctx).Fatal("non 1PC transaction committed in 1PC",
 			zap.Uint64("session", c.sessionID), zap.Uint64("startTS", c.startTS))
 	}
+	if ctx.Value("tangenta-dml") != nil {
+		logutil.BgLogger().Info("tangenta-dml: get commit ts", zap.Bool("asyncCommit", c.isAsyncCommit()))
+	}
 
 	if c.isAsyncCommit() {
 		if c.minCommitTSMgr.get() == 0 {
@@ -1897,6 +1915,9 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 	} else {
 		start = time.Now()
 		logutil.Event(ctx, "start get commit ts")
+		if ctx.Value("tangenta-ddl") != nil {
+			BeforeDDLGetCommitTS()
+		}
 		commitTS, err = c.store.GetTimestampWithRetry(retry.NewBackofferWithVars(ctx, TsoMaxBackoff, c.txn.vars), c.txn.GetScope())
 		if err != nil {
 			logutil.Logger(ctx).Warn("2PC get commitTS failed",
@@ -1904,9 +1925,15 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 				zap.Uint64("txnStartTS", c.startTS))
 			return err
 		}
+		if ctx.Value("tangenta-ddl") != nil {
+			AfterDDLGetCommitTS(commitTS)
+		}
 		commitDetail.GetCommitTsTime = time.Since(start)
 		logutil.Event(ctx, "finish get commit ts")
 		logutil.SetTag(ctx, "commitTs", commitTS)
+	}
+	if ctx.Value("tangenta-dml") != nil {
+		AfterDMLGetCommitTS(commitTS)
 	}
 
 	if !c.isAsyncCommit() {
@@ -1990,6 +2017,11 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 		})
 		return nil
 	}
+	defer func() {
+		if ctx.Value("tangenta-ddl") != nil {
+			AfterDDLCommit(c.commitTS)
+		}
+	}()
 	return c.commitTxn(ctx, commitDetail)
 }
 
@@ -2100,11 +2132,13 @@ func (c *twoPhaseCommitter) calculateMaxCommitTS(ctx context.Context) error {
 
 	safeWindow := config.GetGlobalConfig().TiKVClient.AsyncCommit.SafeWindow
 	maxCommitTS := oracle.ComposeTS(int64(safeWindow/time.Millisecond), 0) + currentTS
-	logutil.BgLogger().Debug("calculate MaxCommitTS",
-		zap.Time("startTime", c.txn.startTime),
-		zap.Duration("safeWindow", safeWindow),
-		zap.Uint64("startTS", c.startTS),
-		zap.Uint64("maxCommitTS", maxCommitTS))
+	if ctx.Value("tangenta-dml") != nil {
+		logutil.BgLogger().Info("calculate MaxCommitTS",
+			zap.Time("startTime", c.txn.startTime),
+			zap.Duration("safeWindow", safeWindow),
+			zap.Uint64("startTS", c.startTS),
+			zap.Uint64("maxCommitTS", maxCommitTS))
+	}
 
 	c.maxCommitTS = maxCommitTS
 	return nil

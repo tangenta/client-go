@@ -237,6 +237,9 @@ func (action actionPrewrite) handleSingleBatch(
 	for {
 		// It will return false if the request is success or meet an unretryable error.
 		// otherwise if the error is retryable, it will return true.
+		if bo.GetCtx().Value("tangenta-dml") != nil {
+			BeforePrewrite()
+		}
 		retryable, err = handler.sendReqAndCheck()
 		if !retryable {
 			handler.drop(err)
@@ -611,6 +614,10 @@ func (handler *prewrite1BatchReqHandler) handleSingleBatchSucceed(reqBegin time.
 				handler.committer.minCommitTSMgr.tryUpdate(prewriteResp.MinCommitTs, twoPCAccess)
 			}
 			handler.committer.mu.Unlock()
+			if handler.bo.GetCtx().Value("tangenta-dml") != nil {
+				AfterDMLUpdateLatestTS(prewriteResp.MinCommitTs)
+				logutil.BgLogger().Info("tangenta-dml: after update latest ts", zap.Uint64("ts", prewriteResp.MinCommitTs))
+			}
 		}
 	}
 	return nil
